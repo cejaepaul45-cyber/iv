@@ -1,0 +1,119 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include "HX711.h"
+
+// 1. Local Wi-Fi Configuration
+const char* ssid = "ESP32_IV_Scale";
+const char* password = "Password123";
+
+// 2. Hardware Pin Definitions for ESP32
+const int LOADCELL_DOUT_PIN = 22; // Moved away from Pin 3
+const int LOADCELL_SCK_PIN = 23;  // Moved away from Pin 2
+
+// 3. Object Initializations
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+HX711 scale;
+WebServer server(80);
+
+float calibration_factor = -20.0; // Preserving your exact working factor!
+
+// --- EMBEDDED WEB DASHBOARD ---
+const char HTML_DASHBOARD[] PROGMEM = R"=====(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IV Fluid Monitor</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #f3f4f6; margin: 0; padding: 20px; text-align: center; color: #333; }
+        .card { background: white; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); padding: 30px; max-width: 400px; margin: 40px auto; }
+        h2 { color: #1e3a8a; margin-top: 0; }
+        .weight-display { font-size: 54px; font-weight: bold; color: #111827; margin: 20px 0; }
+        .unit { font-size: 24px; color: #6b7280; }
+        .status { display: inline-block; background: #e6f4ea; color: #137333; padding: 6px 12px; border-radius: 20px; font-weight: bold; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>IV Fluid Volume</h2>
+        <div class="status">● Wireless Live Feed</div>
+        <div class="weight-display">
+            <span id="volumeValue">0</span><span class="unit"> ml</span>
+        </div>
+    </div>
+<script>
+    // Fetch live weight from the ESP32 every 800 milliseconds
+    setInterval(function() {
+        fetch('/get_volume')
+            .then(response => response.text())
+            .then(data => {
+                document.getElementById('volumeValue').innerText = data;
+            });
+    }, 800); 
+</script>
+</body>
+</html>
+)=====";
+
+// --- WEB ROUTE HANDLERS ---
+void handleRoot() {
+  server.send(200, "text/html", HTML_DASHBOARD);
+}
+
+void handleGetVolume() {
+  float avg_ml = scale.get_units(5); 
+  if (avg_ml < 0) avg_ml = 0.0;
+  server.send(200, "text/plain", String(avg_ml, 0)); // Send zero-decimal number to web
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize the I2C LCD (ESP32 uses D21 for SDA, D22 for SCL automatically)
+  Wire.begin(21, 22); 
+  lcd.init();                      
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Zeroing Scale...");
+
+  // Initialize the Load Cell
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(calibration_factor);
+  scale.tare(); 
+  
+  lcd.clear();
+  Serial.println("Scale zeroed.");
+
+  // Broadcast ESP32 Standalone Wi-Fi Network
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("Connect to Wi-Fi. Access Dashboard at URL: ");
+  Serial.println(IP); 
+
+  // Setup Web Server Routes
+  server.on("/", handleRoot);
+  server.on("/get_volume", handleGetVolume);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient(); // Handle web dashboard requests
+
+  // Simultaneously update the physical LCD screen layout
+  if (scale.is_ready()) {
+    float avg_ml = scale.get_units(5);
+    if (avg_ml < 0) avg_ml = 0.0;
+
+    lcd.setCursor(0, 0);
+    lcd.print("IV Fluid Vol:   ");
+    lcd.setCursor(0, 1);
+    lcd.print(String(avg_ml, 0) + " ml       "); 
+  } else {
+    lcd.setCursor(0, 0);
+    lcd.print("HX711 Error!    ");
+  }
+
+  delay(200); // Quick refresh balance
+}
